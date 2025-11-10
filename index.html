@@ -82,7 +82,8 @@
         const limitMessage = document.getElementById('limit-message');
 
         /**
-         * Initializes Firebase and authenticates the user.
+         * Initializes Firebase and authenticates the user, then immediately fetches and displays usage.
+         * This optimized version uses await on sign-in to load credits faster than waiting for onAuthStateChanged.
          */
         async function initializeFirebase() {
             if (!FIREBASE_CONFIG) {
@@ -94,24 +95,51 @@
             db = getFirestore(app);
             auth = getAuth(app);
 
-            // Sign in using custom token if available, otherwise sign in anonymously
-            onAuthStateChanged(auth, async (user) => {
+            try {
+                let user;
+                // 1. Attempt sign-in with custom token, or anonymously if no token
+                if (INITIAL_AUTH_TOKEN) {
+                    const userCredential = await signInWithCustomToken(auth, INITIAL_AUTH_TOKEN);
+                    user = userCredential.user;
+                } else {
+                    const userCredential = await signInAnonymously(auth);
+                    user = userCredential.user;
+                }
+
                 if (user) {
                     userId = user.uid;
                     isAuthReady = true;
-                    console.log("Authenticated with UID:", userId);
-                    await updateUsageDisplay();
-                } else {
-                    if (INITIAL_AUTH_TOKEN) {
-                        try {
-                            await signInWithCustomToken(auth, INITIAL_AUTH_TOKEN);
-                        } catch (error) {
-                            console.error("Custom token sign-in failed:", error);
-                            await signInAnonymously(auth);
-                        }
-                    } else {
-                        await signInAnonymously(auth);
-                    }
+                    console.log("Authentication successful with UID:", userId);
+                    // 2. Crucial: Load and display credits immediately after sign-in resolves.
+                    await checkAndIncrementUsage(false); 
+                }
+                
+            } catch (error) {
+                console.error("Initial sign-in failed, attempting anonymous fallback:", error);
+                try {
+                    // Fallback to anonymous sign-in if custom token fails
+                    const userCredential = await signInAnonymously(auth);
+                    userId = userCredential.user.uid;
+                    isAuthReady = true;
+                    console.log("Fallback to Anonymous UID:", userId);
+                    await checkAndIncrementUsage(false);
+                } catch (anonError) {
+                    console.error("Anonymous sign-in also failed:", anonError);
+                }
+            }
+
+            // 3. Keep onAuthStateChanged for monitoring but it no longer handles the initial data load.
+            onAuthStateChanged(auth, (user) => {
+                if (!user) {
+                    userId = null;
+                    isAuthReady = false;
+                    // Only update display state if user logs out (unlikely here)
+                    updateUsageDisplay(); 
+                } else if (user.uid !== userId) {
+                    // If user changes for some reason, refetch data
+                    userId = user.uid;
+                    isAuthReady = true;
+                    checkAndIncrementUsage(false); 
                 }
             });
         }
@@ -123,7 +151,8 @@
          */
         async function checkAndIncrementUsage(increment = false) {
             if (!isAuthReady || !db || !userId) {
-                console.error("Auth not ready or missing components.");
+                // If not ready, show checking status and return false
+                updateUsageDisplay(); 
                 return false;
             }
 
@@ -169,6 +198,8 @@
         function updateUsageDisplay() {
             if (!isAuthReady) {
                 usageCounter.textContent = "Checking access...";
+                // Ensure button is disabled while checking
+                submitButton.disabled = true;
                 return;
             }
 
@@ -303,8 +334,8 @@
                     resultsDiv.innerHTML = '<p class="text-red-400 p-4" role="alert">Please select a diversity group and enter your current endeavor.</p>';
                     resultsDiv.classList.remove('hidden');
                     loaderDiv.classList.add('hidden');
-                    submitButton.disabled = false;
-                    submitButton.textContent = 'Get Inspiration';
+                    // Use updateUsageDisplay to re-enable button if limit not reached
+                    updateUsageDisplay(); 
                     return;
                 }
 
@@ -344,9 +375,9 @@
                 } finally {
                     // Hide loading state
                     loaderDiv.classList.add('hidden');
-                    // Note: button state is updated by updateUsageDisplay in checkAndIncrementUsage if limit reached
-                    if (usageCount < USAGE_LIMIT) {
-                         submitButton.disabled = false;
+                    // Update button state (will re-enable if count is okay)
+                    updateUsageDisplay(); 
+                    if (submitButton.disabled === false) {
                          submitButton.textContent = 'Get Inspiration';
                     }
                 }
